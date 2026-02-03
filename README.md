@@ -2,9 +2,11 @@
 
 This bundle contains everything students need to train, evaluate, and submit agents.
 
-## Install
+## Install (Python 3.13)
+We recommend Python 3.13 to avoid building `pygame` from source.
 ```bash
-pip install -r eval/requirements.txt -r src/requirements.txt
+uv venv --python 3.13 .venv
+uv pip install -p .venv/bin/python -r eval/requirements.txt -r src/requirements.txt
 ```
 
 ## Train

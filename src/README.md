@@ -1,8 +1,10 @@
 # Student Starter Kit
 
-## 1) Install
+## 1) Install (Python 3.13)
+We recommend Python 3.13 to avoid building `pygame` from source.
 ```bash
-pip install gymnasium minigrid stable-baselines3
+uv venv --python 3.13 .venv
+uv pip install -p .venv/bin/python -r src/requirements.txt
 ```
 
 ## 2) Train a baseline
