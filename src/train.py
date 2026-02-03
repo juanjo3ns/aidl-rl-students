@@ -1,6 +1,7 @@
 import argparse
 import os
 import time
+from collections import deque
 from pathlib import Path
 
 import gymnasium as gym
@@ -53,6 +54,50 @@ class WandbEvalCallback(BaseCallback):
         return True
 
 
+class WandbTrainCallback(BaseCallback):
+    def __init__(self, log_interval: int):
+        super().__init__()
+        self.log_interval = log_interval
+        self.ep_rewards = deque(maxlen=100)
+        self.ep_lengths = deque(maxlen=100)
+        self.start_time = time.time()
+
+    def _collect_logger_metrics(self):
+        metrics = {}
+        logger = getattr(self.model, "logger", None)
+        name_to_value = getattr(logger, "name_to_value", None)
+        if isinstance(name_to_value, dict):
+            for key, value in name_to_value.items():
+                if not isinstance(value, (int, float)):
+                    continue
+                if key.startswith("train/") or key.startswith("rollout/") or "loss" in key:
+                    metrics[f"sb3/{key}"] = value
+        return metrics
+
+    def _on_step(self) -> bool:
+        infos = self.locals.get("infos", [])
+        for info in infos:
+            if isinstance(info, dict) and "episode" in info:
+                episode = info["episode"]
+                self.ep_rewards.append(episode.get("r", 0.0))
+                self.ep_lengths.append(episode.get("l", 0))
+
+        if self.log_interval > 0 and self.n_calls % self.log_interval == 0:
+            import wandb
+
+            metrics = {
+                "train/num_timesteps": self.num_timesteps,
+                "train/elapsed_sec": time.time() - self.start_time,
+            }
+            if self.ep_rewards:
+                metrics["train/episode_reward_mean"] = sum(self.ep_rewards) / len(self.ep_rewards)
+            if self.ep_lengths:
+                metrics["train/episode_length_mean"] = sum(self.ep_lengths) / len(self.ep_lengths)
+            metrics.update(self._collect_logger_metrics())
+            wandb.log(metrics, step=self.num_timesteps)
+        return True
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--env-id", required=True)
@@ -60,6 +105,7 @@ def main():
     parser.add_argument("--total-steps", type=int, default=200_000)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--model-path", default="models/agent.zip")
+    parser.add_argument("--verbose", type=int, default=0, help="SB3 verbosity (0=silent).")
     parser.add_argument("--wandb", action="store_true", help="Enable Weights & Biases logging.")
     parser.add_argument("--wandb-project", default=os.getenv("WANDB_PROJECT", "aidl-rl-benchmark"))
     parser.add_argument("--wandb-entity", default=os.getenv("WANDB_ENTITY"))
@@ -69,6 +115,7 @@ def main():
     parser.add_argument("--wandb-mode", default=os.getenv("WANDB_MODE", "online"))
     parser.add_argument("--eval-interval", type=int, default=0, help="Timesteps between evals.")
     parser.add_argument("--eval-episodes", type=int, default=5)
+    parser.add_argument("--log-interval", type=int, default=1000, help="Timesteps between train logs.")
     args = parser.parse_args()
 
     model_path = Path(args.model_path)
@@ -100,7 +147,7 @@ def main():
     vec_env = VecMonitor(vec_env)
 
     algo_cls = ALGO_MAP[args.algo]
-    model = algo_cls("MlpPolicy", vec_env, verbose=1, seed=args.seed)
+    model = algo_cls("MlpPolicy", vec_env, verbose=args.verbose, seed=args.seed)
 
     callbacks = []
     eval_env = None
@@ -108,6 +155,8 @@ def main():
         eval_env = make_env(args.env_id, args.seed + 1)
         if args.wandb:
             callbacks.append(WandbEvalCallback(eval_env, args.eval_interval, args.eval_episodes))
+    if args.wandb:
+        callbacks.append(WandbTrainCallback(args.log_interval))
 
     start = time.time()
     model.learn(total_timesteps=args.total_steps, callback=callbacks if callbacks else None)
