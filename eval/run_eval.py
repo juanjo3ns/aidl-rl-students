@@ -15,8 +15,8 @@ ALGO_MAP = {
 }
 
 
-def make_env(env_id: str, seed: int):
-    env = gym.make(env_id)
+def make_env(env_id: str, seed: int, render_mode: str | None = None):
+    env = gym.make(env_id, render_mode=render_mode)
     env = FlatObsWrapper(env)
     env.reset(seed=seed)
     return env

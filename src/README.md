@@ -27,7 +27,14 @@ python src/eval_submit.py \
 Set `WANDB_API_KEY` and add `--wandb` to log training and submissions.
 ```bash
 python src/train.py --env-id MiniGrid-Empty-6x6-v0 --algo ppo --total-steps 200000 --wandb --log-interval 1000 --eval-interval 10000 --eval-video
-python src/eval_submit.py --session-code YOUR_SESSION_CODE --team-name "Team Turbo" --env-id MiniGrid-Empty-6x6-v0 --algo ppo --model-path models/agent.zip --api-url https://YOUR-VERCEL-DOMAIN/api/submit --wandb --eval-video
+python src/eval_submit.py --session-code YOUR_SESSION_CODE --team-name "Team Turbo" --env-id MiniGrid-Empty-6x6-v0 --algo ppo --model-path models/agent.zip --api-url https://YOUR-VERCEL-DOMAIN/api/submit --wandb --eval-video --eval-video-format gif
+```
+
+## DQN tuning
+```bash
+python src/train.py --env-id MiniGrid-Empty-6x6-v0 --algo dqn --total-steps 400000 --verbose 0 \\
+  --dqn-exploration-fraction 0.3 --dqn-exploration-final-eps 0.05 --dqn-learning-rate 1e-4 \\
+  --dqn-buffer-size 200000 --dqn-learning-starts 10000 --dqn-train-freq 4 --dqn-gradient-steps 1
 ```
 
 ## Notes

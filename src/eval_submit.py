@@ -32,7 +32,7 @@ def record_video(env_id: str, model_path: str, algo: str, max_frames: int):
             frames.append(frame)
     env.close()
     if frames:
-        return np.stack(frames)
+        return np.stack(frames).astype(np.uint8)
     return None
 
 
@@ -68,6 +68,7 @@ def main():
     parser.add_argument("--eval-video", action="store_true", help="Upload an eval video to W&B.")
     parser.add_argument("--eval-video-fps", type=int, default=10)
     parser.add_argument("--eval-video-max-frames", type=int, default=500)
+    parser.add_argument("--eval-video-format", default="gif", choices=["gif", "mp4"])
     args = parser.parse_args()
 
     metrics = run_eval(args.env_id, args.algo, args.model_path, args.seeds, args.episodes_per_seed)
@@ -126,7 +127,7 @@ def main():
         if args.eval_video:
             frames = record_video(args.env_id, args.model_path, args.algo, args.eval_video_max_frames)
             if frames is not None:
-                wandb.log({"eval/video": wandb.Video(frames, fps=args.eval_video_fps, format="mp4")})
+                wandb.log({"eval/video": wandb.Video(frames, fps=args.eval_video_fps, format=args.eval_video_format)})
         wandb.finish()
 
 

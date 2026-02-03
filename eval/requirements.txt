@@ -3,3 +3,4 @@ minigrid
 stable-baselines3
 torch
 wandb
+wandb[media]

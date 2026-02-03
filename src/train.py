@@ -35,6 +35,7 @@ class WandbEvalCallback(BaseCallback):
         video_interval: int,
         video_fps: int,
         video_max_frames: int,
+        video_format: str,
     ):
         super().__init__()
         self.eval_env = eval_env
@@ -44,6 +45,7 @@ class WandbEvalCallback(BaseCallback):
         self.video_interval = video_interval
         self.video_fps = video_fps
         self.video_max_frames = video_max_frames
+        self.video_format = video_format
 
     def _run_eval(self, record_video: bool):
         episode_returns = []
@@ -88,7 +90,8 @@ class WandbEvalCallback(BaseCallback):
             metrics["train/timesteps"] = self.num_timesteps
 
             if record and frames:
-                video = wandb.Video(np.stack(frames), fps=self.video_fps, format="mp4")
+                video_frames = np.stack(frames).astype(np.uint8)
+                video = wandb.Video(video_frames, fps=self.video_fps, format=self.video_format)
                 metrics["eval/video"] = video
 
             wandb.log(metrics, step=self.num_timesteps)
@@ -173,6 +176,20 @@ def main():
     parser.add_argument("--eval-video-interval", type=int, default=0, help="Timesteps between eval videos.")
     parser.add_argument("--eval-video-fps", type=int, default=10)
     parser.add_argument("--eval-video-max-frames", type=int, default=500)
+    parser.add_argument("--eval-video-format", default="gif", choices=["gif", "mp4"])
+    parser.add_argument("--dqn-learning-rate", type=float, default=1e-4)
+    parser.add_argument("--dqn-buffer-size", type=int, default=1_000_000)
+    parser.add_argument("--dqn-learning-starts", type=int, default=50_000)
+    parser.add_argument("--dqn-batch-size", type=int, default=32)
+    parser.add_argument("--dqn-gamma", type=float, default=0.99)
+    parser.add_argument("--dqn-tau", type=float, default=1.0)
+    parser.add_argument("--dqn-train-freq", type=int, default=4)
+    parser.add_argument("--dqn-gradient-steps", type=int, default=1)
+    parser.add_argument("--dqn-target-update-interval", type=int, default=10_000)
+    parser.add_argument("--dqn-exploration-fraction", type=float, default=0.1)
+    parser.add_argument("--dqn-exploration-initial-eps", type=float, default=1.0)
+    parser.add_argument("--dqn-exploration-final-eps", type=float, default=0.05)
+    parser.add_argument("--dqn-net-arch", default="")
     args = parser.parse_args()
 
     model_path = Path(args.model_path)
@@ -204,7 +221,33 @@ def main():
     vec_env = VecMonitor(vec_env)
 
     algo_cls = ALGO_MAP[args.algo]
-    model = algo_cls("MlpPolicy", vec_env, verbose=args.verbose, seed=args.seed)
+    model_kwargs = {
+        "verbose": args.verbose,
+        "seed": args.seed,
+    }
+    if args.algo == "dqn":
+        model_kwargs.update(
+            {
+                "learning_rate": args.dqn_learning_rate,
+                "buffer_size": args.dqn_buffer_size,
+                "learning_starts": args.dqn_learning_starts,
+                "batch_size": args.dqn_batch_size,
+                "gamma": args.dqn_gamma,
+                "tau": args.dqn_tau,
+                "train_freq": args.dqn_train_freq,
+                "gradient_steps": args.dqn_gradient_steps,
+                "target_update_interval": args.dqn_target_update_interval,
+                "exploration_fraction": args.dqn_exploration_fraction,
+                "exploration_initial_eps": args.dqn_exploration_initial_eps,
+                "exploration_final_eps": args.dqn_exploration_final_eps,
+            }
+        )
+        if args.dqn_net_arch:
+            net_arch = [int(x.strip()) for x in args.dqn_net_arch.split(",") if x.strip()]
+            if net_arch:
+                model_kwargs["policy_kwargs"] = {"net_arch": net_arch}
+
+    model = algo_cls("MlpPolicy", vec_env, **model_kwargs)
 
     callbacks = []
     eval_env = None
@@ -220,6 +263,7 @@ def main():
                     args.eval_video_interval or args.eval_interval,
                     args.eval_video_fps,
                     args.eval_video_max_frames,
+                    args.eval_video_format,
                 )
             )
     if args.wandb:
