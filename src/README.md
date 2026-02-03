@@ -7,12 +7,12 @@ pip install gymnasium minigrid stable-baselines3
 
 ## 2) Train a baseline
 ```bash
-python student/train.py --env-id MiniGrid-Empty-6x6-v0 --algo ppo --total-steps 200000
+python src/train.py --env-id MiniGrid-Empty-6x6-v0 --algo ppo --total-steps 200000
 ```
 
 ## 3) Evaluate + Submit
 ```bash
-python student/eval_submit.py \
+python src/eval_submit.py \
   --session-code LAB2026 \
   --team-name "Team Turbo" \
   --env-id MiniGrid-Empty-6x6-v0 \
