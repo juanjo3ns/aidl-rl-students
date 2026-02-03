@@ -5,12 +5,12 @@ from collections import deque
 from pathlib import Path
 
 import gymnasium as gym
+import numpy as np
 from minigrid.wrappers import FlatObsWrapper
 from stable_baselines3 import PPO, DQN
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import VecMonitor
 from stable_baselines3.common.callbacks import BaseCallback
-from stable_baselines3.common.evaluation import evaluate_policy
 
 ALGO_MAP = {
     "ppo": PPO,
@@ -18,39 +18,80 @@ ALGO_MAP = {
 }
 
 
-def make_env(env_id: str, seed: int):
-    env = gym.make(env_id)
+def make_env(env_id: str, seed: int, render_mode: str | None = None):
+    env = gym.make(env_id, render_mode=render_mode)
     env = FlatObsWrapper(env)
     env.reset(seed=seed)
     return env
 
 
 class WandbEvalCallback(BaseCallback):
-    def __init__(self, eval_env, eval_freq: int, n_eval_episodes: int):
+    def __init__(
+        self,
+        eval_env,
+        eval_freq: int,
+        n_eval_episodes: int,
+        record_video: bool,
+        video_interval: int,
+        video_fps: int,
+        video_max_frames: int,
+    ):
         super().__init__()
         self.eval_env = eval_env
         self.eval_freq = eval_freq
         self.n_eval_episodes = n_eval_episodes
+        self.record_video = record_video
+        self.video_interval = video_interval
+        self.video_fps = video_fps
+        self.video_max_frames = video_max_frames
+
+    def _run_eval(self, record_video: bool):
+        episode_returns = []
+        successes = 0
+        frames = []
+
+        for ep in range(self.n_eval_episodes):
+            obs, _ = self.eval_env.reset()
+            done = False
+            total_reward = 0.0
+            while not done:
+                action, _ = self.model.predict(obs, deterministic=True)
+                obs, reward, terminated, truncated, _ = self.eval_env.step(action)
+                done = terminated or truncated
+                total_reward += reward
+                if record_video and ep == 0 and len(frames) < self.video_max_frames:
+                    frame = self.eval_env.render()
+                    if frame is not None:
+                        frames.append(frame)
+
+            episode_returns.append(total_reward)
+            if total_reward > 0:
+                successes += 1
+
+        metrics = {
+            "eval/mean_reward": float(np.mean(episode_returns)),
+            "eval/std_reward": float(np.std(episode_returns)),
+            "eval/max_reward": float(np.max(episode_returns)),
+            "eval/success_rate": successes / max(len(episode_returns), 1),
+            "eval/episodes": len(episode_returns),
+        }
+        return metrics, frames
 
     def _on_step(self) -> bool:
         if self.eval_freq <= 0:
             return True
         if self.n_calls % self.eval_freq == 0:
-            mean_reward, std_reward = evaluate_policy(
-                self.model,
-                self.eval_env,
-                n_eval_episodes=self.n_eval_episodes,
-                deterministic=True,
-            )
             import wandb
 
-            wandb.log(
-                {
-                    "eval/mean_reward": mean_reward,
-                    "eval/std_reward": std_reward,
-                    "train/timesteps": self.num_timesteps,
-                }
-            )
+            record = self.record_video and (self.video_interval > 0) and (self.n_calls % self.video_interval == 0)
+            metrics, frames = self._run_eval(record_video=record)
+            metrics["train/timesteps"] = self.num_timesteps
+
+            if record and frames:
+                video = wandb.Video(np.stack(frames), fps=self.video_fps, format="mp4")
+                metrics["eval/video"] = video
+
+            wandb.log(metrics, step=self.num_timesteps)
         return True
 
 
@@ -60,6 +101,7 @@ class WandbTrainCallback(BaseCallback):
         self.log_interval = log_interval
         self.ep_rewards = deque(maxlen=100)
         self.ep_lengths = deque(maxlen=100)
+        self.ep_successes = deque(maxlen=100)
         self.start_time = time.time()
 
     def _collect_logger_metrics(self):
@@ -81,6 +123,14 @@ class WandbTrainCallback(BaseCallback):
                 episode = info["episode"]
                 self.ep_rewards.append(episode.get("r", 0.0))
                 self.ep_lengths.append(episode.get("l", 0))
+                success = False
+                if "is_success" in info:
+                    success = bool(info.get("is_success"))
+                elif "success" in info:
+                    success = bool(info.get("success"))
+                else:
+                    success = episode.get("r", 0.0) > 0.0
+                self.ep_successes.append(1 if success else 0)
 
         if self.log_interval > 0 and self.n_calls % self.log_interval == 0:
             import wandb
@@ -93,6 +143,9 @@ class WandbTrainCallback(BaseCallback):
                 metrics["train/episode_reward_mean"] = sum(self.ep_rewards) / len(self.ep_rewards)
             if self.ep_lengths:
                 metrics["train/episode_length_mean"] = sum(self.ep_lengths) / len(self.ep_lengths)
+            if self.ep_successes:
+                metrics["train/success_count_window"] = sum(self.ep_successes)
+                metrics["train/success_rate_window"] = sum(self.ep_successes) / len(self.ep_successes)
             metrics.update(self._collect_logger_metrics())
             wandb.log(metrics, step=self.num_timesteps)
         return True
@@ -116,6 +169,10 @@ def main():
     parser.add_argument("--eval-interval", type=int, default=0, help="Timesteps between evals.")
     parser.add_argument("--eval-episodes", type=int, default=5)
     parser.add_argument("--log-interval", type=int, default=1000, help="Timesteps between train logs.")
+    parser.add_argument("--eval-video", action="store_true", help="Upload eval video to W&B.")
+    parser.add_argument("--eval-video-interval", type=int, default=0, help="Timesteps between eval videos.")
+    parser.add_argument("--eval-video-fps", type=int, default=10)
+    parser.add_argument("--eval-video-max-frames", type=int, default=500)
     args = parser.parse_args()
 
     model_path = Path(args.model_path)
@@ -152,9 +209,19 @@ def main():
     callbacks = []
     eval_env = None
     if args.eval_interval > 0:
-        eval_env = make_env(args.env_id, args.seed + 1)
+        eval_env = make_env(args.env_id, args.seed + 1, render_mode="rgb_array" if args.eval_video else None)
         if args.wandb:
-            callbacks.append(WandbEvalCallback(eval_env, args.eval_interval, args.eval_episodes))
+            callbacks.append(
+                WandbEvalCallback(
+                    eval_env,
+                    args.eval_interval,
+                    args.eval_episodes,
+                    args.eval_video,
+                    args.eval_video_interval or args.eval_interval,
+                    args.eval_video_fps,
+                    args.eval_video_max_frames,
+                )
+            )
     if args.wandb:
         callbacks.append(WandbTrainCallback(args.log_interval))
 

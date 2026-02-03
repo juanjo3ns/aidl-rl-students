@@ -1,29 +1,39 @@
 import argparse
 import json
 import os
-import subprocess
-import sys
 import urllib.request
+
+import numpy as np
+
+from eval.run_eval import ALGO_MAP, evaluate, make_env
 
 
 def run_eval(env_id: str, algo: str, model_path: str, seeds_path: str, episodes_per_seed: int):
-    cmd = [
-        sys.executable,
-        "-m",
-        "eval.run_eval",
-        "--env-id",
-        env_id,
-        "--algo",
-        algo,
-        "--model-path",
-        model_path,
-        "--seeds",
-        seeds_path,
-        "--episodes-per-seed",
-        str(episodes_per_seed),
-    ]
-    output = subprocess.check_output(cmd, text=True)
-    return json.loads(output)
+    model_cls = ALGO_MAP[algo]
+    model = model_cls.load(model_path)
+    with open(seeds_path, "r", encoding="utf-8") as f:
+        seeds = json.load(f)
+    return evaluate(model, env_id, seeds, episodes_per_seed)
+
+
+def record_video(env_id: str, model_path: str, algo: str, max_frames: int):
+    model_cls = ALGO_MAP[algo]
+    model = model_cls.load(model_path)
+    env = make_env(env_id, seed=0, render_mode="rgb_array")
+    obs, _ = env.reset(seed=0)
+    frames = []
+    done = False
+    while not done and len(frames) < max_frames:
+        action, _ = model.predict(obs, deterministic=True)
+        obs, reward, terminated, truncated, _ = env.step(action)
+        done = terminated or truncated
+        frame = env.render()
+        if frame is not None:
+            frames.append(frame)
+    env.close()
+    if frames:
+        return np.stack(frames)
+    return None
 
 
 def submit(api_url: str, payload: dict):
@@ -55,6 +65,9 @@ def main():
     parser.add_argument("--wandb-run-name", default=os.getenv("WANDB_RUN_NAME"))
     parser.add_argument("--wandb-tags", default=os.getenv("WANDB_TAGS", "submission"))
     parser.add_argument("--wandb-mode", default=os.getenv("WANDB_MODE", "online"))
+    parser.add_argument("--eval-video", action="store_true", help="Upload an eval video to W&B.")
+    parser.add_argument("--eval-video-fps", type=int, default=10)
+    parser.add_argument("--eval-video-max-frames", type=int, default=500)
     args = parser.parse_args()
 
     metrics = run_eval(args.env_id, args.algo, args.model_path, args.seeds, args.episodes_per_seed)
@@ -110,6 +123,10 @@ def main():
                 "submission/rank": rank,
             }
         )
+        if args.eval_video:
+            frames = record_video(args.env_id, args.model_path, args.algo, args.eval_video_max_frames)
+            if frames is not None:
+                wandb.log({"eval/video": wandb.Video(frames, fps=args.eval_video_fps, format="mp4")})
         wandb.finish()
 
 
