@@ -1,0 +1,4 @@
+gymnasium
+minigrid
+stable-baselines3
+torch
