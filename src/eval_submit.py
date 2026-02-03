@@ -29,7 +29,19 @@ def record_video(env_id: str, model_path: str, algo: str, max_frames: int):
         done = terminated or truncated
         frame = env.render()
         if frame is not None:
-            frames.append(frame)
+            frame = np.asarray(frame)
+            if frame.ndim == 2:
+                frame = np.stack([frame, frame, frame], axis=-1)
+            if frame.ndim == 3 and frame.shape[-1] == 4:
+                frame = frame[..., :3]
+            if frame.ndim == 3 and frame.shape[-1] == 3:
+                if frame.dtype != np.uint8:
+                    max_val = float(frame.max()) if frame.size else 0.0
+                    if max_val <= 1.0:
+                        frame = (frame * 255.0).clip(0, 255).astype(np.uint8)
+                    else:
+                        frame = frame.clip(0, 255).astype(np.uint8)
+                frames.append(frame)
     env.close()
     if frames:
         return np.stack(frames).astype(np.uint8)

@@ -25,6 +25,25 @@ def make_env(env_id: str, seed: int, render_mode: str | None = None):
     return env
 
 
+def normalize_frame(frame) -> np.ndarray | None:
+    if frame is None:
+        return None
+    arr = np.asarray(frame)
+    if arr.ndim == 2:
+        arr = np.stack([arr, arr, arr], axis=-1)
+    if arr.ndim == 3 and arr.shape[-1] == 4:
+        arr = arr[..., :3]
+    if arr.ndim != 3 or arr.shape[-1] != 3:
+        return None
+    if arr.dtype != np.uint8:
+        max_val = float(arr.max()) if arr.size else 0.0
+        if max_val <= 1.0:
+            arr = (arr * 255.0).clip(0, 255).astype(np.uint8)
+        else:
+            arr = arr.clip(0, 255).astype(np.uint8)
+    return arr
+
+
 class WandbEvalCallback(BaseCallback):
     def __init__(
         self,
@@ -62,7 +81,7 @@ class WandbEvalCallback(BaseCallback):
                 done = terminated or truncated
                 total_reward += reward
                 if record_video and ep == 0 and len(frames) < self.video_max_frames:
-                    frame = self.eval_env.render()
+                    frame = normalize_frame(self.eval_env.render())
                     if frame is not None:
                         frames.append(frame)
 
@@ -90,7 +109,7 @@ class WandbEvalCallback(BaseCallback):
             metrics["train/timesteps"] = self.num_timesteps
 
             if record and frames:
-                video_frames = np.stack(frames).astype(np.uint8)
+                video_frames = np.stack(frames)
                 video = wandb.Video(video_frames, fps=self.video_fps, format=self.video_format)
                 metrics["eval/video"] = video
 
@@ -179,7 +198,7 @@ def main():
     parser.add_argument("--eval-video-format", default="gif", choices=["gif", "mp4"])
     parser.add_argument("--dqn-learning-rate", type=float, default=1e-4)
     parser.add_argument("--dqn-buffer-size", type=int, default=1_000_000)
-    parser.add_argument("--dqn-learning-starts", type=int, default=50_000)
+    parser.add_argument("--dqn-learning-starts", type=int, default=1_000)
     parser.add_argument("--dqn-batch-size", type=int, default=32)
     parser.add_argument("--dqn-gamma", type=float, default=0.99)
     parser.add_argument("--dqn-tau", type=float, default=1.0)
