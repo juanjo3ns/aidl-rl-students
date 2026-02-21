@@ -7,6 +7,9 @@ import numpy as np
 
 from eval.run_eval import ALGO_MAP, evaluate, make_env
 
+# Algo choices for HalfCheetah (continuous control: ppo, a2c, sac, td3)
+ALGO_CHOICES = list(ALGO_MAP.keys())
+
 
 def run_eval(env_id: str, algo: str, model_path: str, seeds_path: str, episodes_per_seed: int):
     model_cls = ALGO_MAP[algo]
@@ -65,7 +68,7 @@ def main():
     parser.add_argument("--session-code", required=True)
     parser.add_argument("--team-name", required=True)
     parser.add_argument("--env-id", required=True)
-    parser.add_argument("--algo", required=True)
+    parser.add_argument("--algo", required=True, choices=ALGO_CHOICES)
     parser.add_argument("--model-path", required=True)
     parser.add_argument("--seeds", default="eval/seeds.json")
     parser.add_argument("--episodes-per-seed", type=int, default=5)
@@ -80,7 +83,7 @@ def main():
     parser.add_argument("--eval-video", action="store_true", help="Upload an eval video to W&B.")
     parser.add_argument("--eval-video-fps", type=int, default=10)
     parser.add_argument("--eval-video-max-frames", type=int, default=500)
-    parser.add_argument("--eval-video-format", default="gif", choices=["gif", "mp4"])
+    parser.add_argument("--eval-video-format", default="mp4", choices=["gif", "mp4"])
     args = parser.parse_args()
 
     metrics = run_eval(args.env_id, args.algo, args.model_path, args.seeds, args.episodes_per_seed)

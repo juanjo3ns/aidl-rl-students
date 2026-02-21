@@ -1,4 +1,5 @@
-gymnasium
-minigrid
+gymnasium[mujoco]
 stable-baselines3
 wandb
+pyyaml
+moviepy

@@ -1,313 +1,395 @@
+"""Algorithm-agnostic training script for HalfCheetah (MuJoCo) + Stable-Baselines3.
+
+All algorithm hyper-parameters live in YAML config files (see src/configs/).
+CLI flags exist only for per-run overrides (env, seed, wandb, …).
+
+Phases are encoded as compound env IDs: HalfCheetah-v4:run, HalfCheetah-v4:backflip,
+HalfCheetah-v4:efficient. The correct reward wrapper is applied automatically.
+
+Usage
+-----
+    python src/train.py -c src/configs/ppo.yaml
+    python src/train.py -c src/configs/sac.yaml --env-id HalfCheetah-v4:backflip --wandb
+    python src/train.py -c src/configs/td3.yaml --total-steps 500000 --wandb
+"""
+
+from __future__ import annotations
+
 import argparse
 import os
+import shutil
+import tempfile
 import time
 from collections import deque
 from pathlib import Path
 
 import gymnasium as gym
 import numpy as np
-from minigrid.wrappers import FlatObsWrapper
-from stable_baselines3 import PPO, DQN
+import yaml
+from gymnasium.wrappers import RecordVideo
+from stable_baselines3 import A2C, DQN, PPO, SAC, TD3
+from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import VecMonitor
-from stable_baselines3.common.callbacks import BaseCallback
 
-ALGO_MAP = {
+# ── Algorithm registry ───────────────────────────────────────────────────
+ALGO_MAP: dict[str, type] = {
     "ppo": PPO,
     "dqn": DQN,
+    "a2c": A2C,
+    "sac": SAC,
+    "td3": TD3,
 }
 
 
-def make_env(env_id: str, seed: int, render_mode: str | None = None):
-    env = gym.make(env_id, render_mode=render_mode)
-    env = FlatObsWrapper(env)
+# ── Compound env_id parsing ─────────────────────────────────────────────
+def parse_env_id(env_id: str) -> tuple[str, str | None]:
+    """Split compound id like 'HalfCheetah-v4:backflip' into (base_id, phase)."""
+    if ":" in env_id:
+        base, phase = env_id.rsplit(":", 1)
+        return base.strip(), phase.strip()
+    return env_id, None
+
+
+# ── Reward wrappers for HalfCheetah phases ───────────────────────────────
+class BackflipReward(gym.RewardWrapper):
+    """Reward = L2 norm of torso angular velocity (encourages flipping)."""
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        qvel = self.unwrapped.data.qvel
+        if len(qvel) >= 6:
+            angular = np.array(qvel[3:6], dtype=np.float64)
+            new_reward = float(np.linalg.norm(angular))
+        else:
+            new_reward = 0.0
+        return obs, new_reward, terminated, truncated, info
+
+
+class EfficientRunReward(gym.RewardWrapper):
+    """Reward = forward_velocity / (1 + control_energy)."""
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        qvel = self.unwrapped.data.qvel
+        forward_vel = float(qvel[0]) if len(qvel) > 0 else 0.0
+        energy = float(np.square(np.asarray(action)).sum())
+        new_reward = forward_vel / (1.0 + energy)
+        return obs, new_reward, terminated, truncated, info
+
+
+def _wrap_phase(env: gym.Env, phase: str | None) -> gym.Env:
+    if phase == "backflip":
+        return BackflipReward(env)
+    if phase == "efficient":
+        return EfficientRunReward(env)
+    return env
+
+
+# ── Config helpers ───────────────────────────────────────────────────────
+def load_config(path: str) -> dict:
+    """Load a YAML config file into a dict."""
+    with open(path) as f:
+        return yaml.safe_load(f)
+
+
+def _apply_cli_overrides(cfg: dict, args: argparse.Namespace) -> None:
+    """Mutate *cfg* with any non-None CLI overrides."""
+    env_cfg = cfg.setdefault("env", {})
+    training = cfg.setdefault("training", {})
+    wandb_cfg = cfg.setdefault("wandb", {})
+
+    if args.env_id:
+        env_cfg["id"] = args.env_id
+    if args.total_steps is not None:
+        training["total_steps"] = args.total_steps
+    if args.seed is not None:
+        training["seed"] = args.seed
+    if args.model_path:
+        training["model_path"] = args.model_path
+    if args.wandb_project:
+        wandb_cfg["project"] = args.wandb_project
+    if args.wandb_entity:
+        wandb_cfg["entity"] = args.wandb_entity
+    if args.wandb_run_name:
+        wandb_cfg["run_name"] = args.wandb_run_name
+    if args.wandb_tags:
+        wandb_cfg["tags"] = [t.strip() for t in args.wandb_tags.split(",")]
+
+
+# ── Environment factory ─────────────────────────────────────────────────
+def make_env(
+    env_id: str,
+    seed: int,
+    render_mode: str | None = None,
+) -> gym.Env:
+    """Create a HalfCheetah environment; apply phase reward wrapper if compound env_id."""
+    base_id, phase = parse_env_id(env_id)
+    env = gym.make(base_id, render_mode=render_mode)
+    env = _wrap_phase(env, phase)
     env.reset(seed=seed)
     return env
 
 
-def normalize_frame(frame) -> np.ndarray | None:
-    if frame is None:
-        return None
-    arr = np.asarray(frame)
-    if arr.ndim == 2:
-        arr = np.stack([arr, arr, arr], axis=-1)
-    if arr.ndim == 3 and arr.shape[-1] == 4:
-        arr = arr[..., :3]
-    if arr.ndim != 3 or arr.shape[-1] != 3:
-        return None
-    if arr.dtype != np.uint8:
-        max_val = float(arr.max()) if arr.size else 0.0
-        if max_val <= 1.0:
-            arr = (arr * 255.0).clip(0, 255).astype(np.uint8)
-        else:
-            arr = arr.clip(0, 255).astype(np.uint8)
-    return arr
+# ── Video recording ─────────────────────────────────────────────────────
+def record_episode_video(
+    env_id: str,
+    seed: int,
+    model,
+) -> tuple[str | None, str | None]:
+    """Record a single evaluation episode to **mp4**."""
+    tmp_dir = tempfile.mkdtemp()
+    env = make_env(env_id, seed, render_mode="rgb_array")
+    rec = RecordVideo(
+        env,
+        tmp_dir,
+        episode_trigger=lambda ep: ep == 0,
+        disable_logger=True,
+    )
+
+    obs, _ = rec.reset()
+    done = False
+    while not done:
+        action, _ = model.predict(obs, deterministic=True)
+        obs, _, terminated, truncated, _ = rec.step(action)
+        done = terminated or truncated
+    rec.close()
+
+    videos = sorted(
+        Path(tmp_dir).glob("*.mp4"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if videos:
+        return str(videos[0]), tmp_dir
+
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+    return None, None
 
 
-class WandbEvalCallback(BaseCallback):
-    def __init__(
-        self,
-        eval_env,
-        eval_freq: int,
-        n_eval_episodes: int,
-        record_video: bool,
-        video_interval: int,
-        video_fps: int,
-        video_max_frames: int,
-        video_format: str,
-    ):
+# ── W&B callbacks ────────────────────────────────────────────────────────
+class EvalCallback(BaseCallback):
+    """Periodic evaluation with optional mp4 video logging to W&B."""
+
+    def __init__(self, eval_env: gym.Env, cfg: dict):
         super().__init__()
         self.eval_env = eval_env
-        self.eval_freq = eval_freq
-        self.n_eval_episodes = n_eval_episodes
-        self.record_video = record_video
-        self.video_interval = video_interval
-        self.video_fps = video_fps
-        self.video_max_frames = video_max_frames
-        self.video_format = video_format
+        eval_ = cfg.get("evaluation", {})
+        self.eval_freq: int = eval_.get("interval", 0)
+        self.n_episodes: int = eval_.get("episodes", 5)
+        self.video_freq: int = eval_.get("video_interval", 0)
+        self.video_fps: int = eval_.get("video_fps", 10)
+        self.env_id: str = cfg.get("env", {}).get("id", "")
+        self.seed: int = cfg.get("training", {}).get("seed", 42)
 
-    def _run_eval(self, record_video: bool):
-        episode_returns = []
+    def _evaluate(self) -> dict[str, float]:
+        returns: list[float] = []
         successes = 0
-        frames = []
-
-        for ep in range(self.n_eval_episodes):
+        for _ in range(self.n_episodes):
             obs, _ = self.eval_env.reset()
-            done = False
-            total_reward = 0.0
+            done, total = False, 0.0
             while not done:
                 action, _ = self.model.predict(obs, deterministic=True)
-                obs, reward, terminated, truncated, _ = self.eval_env.step(action)
-                done = terminated or truncated
-                total_reward += reward
-                if record_video and ep == 0 and len(frames) < self.video_max_frames:
-                    frame = normalize_frame(self.eval_env.render())
-                    if frame is not None:
-                        frames.append(frame)
-
-            episode_returns.append(total_reward)
-            if total_reward > 0:
-                successes += 1
-
-        metrics = {
-            "eval/mean_reward": float(np.mean(episode_returns)),
-            "eval/std_reward": float(np.std(episode_returns)),
-            "eval/max_reward": float(np.max(episode_returns)),
-            "eval/success_rate": successes / max(len(episode_returns), 1),
-            "eval/episodes": len(episode_returns),
+                obs, r, term, trunc, _ = self.eval_env.step(action)
+                done = term or trunc
+                total += r
+            returns.append(total)
+            successes += int(total > 0)
+        return {
+            "eval/mean_reward": float(np.mean(returns)),
+            "eval/std_reward": float(np.std(returns)),
+            "eval/max_reward": float(np.max(returns)),
+            "eval/success_rate": successes / max(len(returns), 1),
         }
-        return metrics, frames
 
     def _on_step(self) -> bool:
-        if self.eval_freq <= 0:
+        if self.eval_freq <= 0 or self.n_calls % self.eval_freq != 0:
             return True
-        if self.n_calls % self.eval_freq == 0:
-            import wandb
 
-            record = self.record_video and (self.video_interval > 0) and (self.n_calls % self.video_interval == 0)
-            metrics, frames = self._run_eval(record_video=record)
-            metrics["train/timesteps"] = self.num_timesteps
+        import wandb
 
-            if record and frames:
-                video_frames = np.stack(frames)
-                video = wandb.Video(video_frames, fps=self.video_fps, format=self.video_format)
-                metrics["eval/video"] = video
+        metrics = self._evaluate()
 
-            wandb.log(metrics, step=self.num_timesteps)
+        tmp_dir = None
+        if self.video_freq > 0 and self.n_calls % self.video_freq == 0:
+            path, tmp_dir = record_episode_video(
+                self.env_id,
+                self.seed + 100,
+                self.model,
+            )
+            if path:
+                metrics["eval/video"] = wandb.Video(
+                    path, fps=self.video_fps, format="mp4",
+                )
+
+        wandb.log(metrics, step=self.num_timesteps)
+
+        if tmp_dir:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
         return True
 
 
-class WandbTrainCallback(BaseCallback):
-    def __init__(self, log_interval: int):
+class TrainLogCallback(BaseCallback):
+    """Streams rolling training statistics to W&B."""
+
+    def __init__(self, log_interval: int = 1000):
         super().__init__()
         self.log_interval = log_interval
-        self.ep_rewards = deque(maxlen=100)
-        self.ep_lengths = deque(maxlen=100)
-        self.ep_successes = deque(maxlen=100)
-        self.start_time = time.time()
-
-    def _collect_logger_metrics(self):
-        metrics = {}
-        logger = getattr(self.model, "logger", None)
-        name_to_value = getattr(logger, "name_to_value", None)
-        if isinstance(name_to_value, dict):
-            for key, value in name_to_value.items():
-                if not isinstance(value, (int, float)):
-                    continue
-                if key.startswith("train/") or key.startswith("rollout/") or "loss" in key:
-                    metrics[f"sb3/{key}"] = value
-        return metrics
+        self.rewards: deque[float] = deque(maxlen=100)
+        self.lengths: deque[int] = deque(maxlen=100)
+        self.successes: deque[int] = deque(maxlen=100)
+        self.t0 = time.time()
 
     def _on_step(self) -> bool:
-        infos = self.locals.get("infos", [])
-        for info in infos:
-            if isinstance(info, dict) and "episode" in info:
-                episode = info["episode"]
-                self.ep_rewards.append(episode.get("r", 0.0))
-                self.ep_lengths.append(episode.get("l", 0))
-                success = False
-                if "is_success" in info:
-                    success = bool(info.get("is_success"))
-                elif "success" in info:
-                    success = bool(info.get("success"))
-                else:
-                    success = episode.get("r", 0.0) > 0.0
-                self.ep_successes.append(1 if success else 0)
+        for info in self.locals.get("infos", []):
+            if "episode" in info:
+                ep = info["episode"]
+                self.rewards.append(ep.get("r", 0.0))
+                self.lengths.append(ep.get("l", 0))
+                s = info.get(
+                    "is_success",
+                    info.get("success", ep.get("r", 0) > 0),
+                )
+                self.successes.append(int(bool(s)))
 
-        if self.log_interval > 0 and self.n_calls % self.log_interval == 0:
+        if (
+            self.log_interval > 0
+            and self.n_calls % self.log_interval == 0
+            and self.rewards
+        ):
             import wandb
 
-            metrics = {
-                "train/num_timesteps": self.num_timesteps,
-                "train/elapsed_sec": time.time() - self.start_time,
-            }
-            if self.ep_rewards:
-                metrics["train/episode_reward_mean"] = sum(self.ep_rewards) / len(self.ep_rewards)
-            if self.ep_lengths:
-                metrics["train/episode_length_mean"] = sum(self.ep_lengths) / len(self.ep_lengths)
-            if self.ep_successes:
-                metrics["train/success_count_window"] = sum(self.ep_successes)
-                metrics["train/success_rate_window"] = sum(self.ep_successes) / len(self.ep_successes)
-            metrics.update(self._collect_logger_metrics())
-            wandb.log(metrics, step=self.num_timesteps)
+            wandb.log(
+                {
+                    "train/reward_mean": float(np.mean(self.rewards)),
+                    "train/length_mean": float(np.mean(self.lengths)),
+                    "train/success_rate": float(np.mean(self.successes)),
+                    "train/elapsed_sec": time.time() - self.t0,
+                },
+                step=self.num_timesteps,
+            )
         return True
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--env-id", required=True)
-    parser.add_argument("--algo", default="ppo", choices=ALGO_MAP.keys())
-    parser.add_argument("--total-steps", type=int, default=200_000)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--model-path", default="models/agent.zip")
-    parser.add_argument("--verbose", type=int, default=0, help="SB3 verbosity (0=silent).")
-    parser.add_argument("--wandb", action="store_true", help="Enable Weights & Biases logging.")
-    parser.add_argument("--wandb-project", default=os.getenv("WANDB_PROJECT", "aidl-rl-benchmark"))
-    parser.add_argument("--wandb-entity", default=os.getenv("WANDB_ENTITY"))
-    parser.add_argument("--wandb-group", default=os.getenv("WANDB_GROUP"))
-    parser.add_argument("--wandb-run-name", default=os.getenv("WANDB_RUN_NAME"))
-    parser.add_argument("--wandb-tags", default=os.getenv("WANDB_TAGS", "training"))
-    parser.add_argument("--wandb-mode", default=os.getenv("WANDB_MODE", "online"))
-    parser.add_argument("--eval-interval", type=int, default=0, help="Timesteps between evals.")
-    parser.add_argument("--eval-episodes", type=int, default=5)
-    parser.add_argument("--log-interval", type=int, default=1000, help="Timesteps between train logs.")
-    parser.add_argument("--eval-video", action="store_true", help="Upload eval video to W&B.")
-    parser.add_argument("--eval-video-interval", type=int, default=0, help="Timesteps between eval videos.")
-    parser.add_argument("--eval-video-fps", type=int, default=10)
-    parser.add_argument("--eval-video-max-frames", type=int, default=500)
-    parser.add_argument("--eval-video-format", default="gif", choices=["gif", "mp4"])
-    parser.add_argument("--dqn-learning-rate", type=float, default=1e-4)
-    parser.add_argument("--dqn-buffer-size", type=int, default=1_000_000)
-    parser.add_argument("--dqn-learning-starts", type=int, default=1_000)
-    parser.add_argument("--dqn-batch-size", type=int, default=32)
-    parser.add_argument("--dqn-gamma", type=float, default=0.99)
-    parser.add_argument("--dqn-tau", type=float, default=1.0)
-    parser.add_argument("--dqn-train-freq", type=int, default=4)
-    parser.add_argument("--dqn-gradient-steps", type=int, default=1)
-    parser.add_argument("--dqn-target-update-interval", type=int, default=10_000)
-    parser.add_argument("--dqn-exploration-fraction", type=float, default=0.1)
-    parser.add_argument("--dqn-exploration-initial-eps", type=float, default=1.0)
-    parser.add_argument("--dqn-exploration-final-eps", type=float, default=0.05)
-    parser.add_argument("--dqn-net-arch", default="")
-    args = parser.parse_args()
+# ── Model builder ────────────────────────────────────────────────────────
+def build_model(cfg: dict, env):
+    """Instantiate an SB3 algorithm from a config dict."""
+    algo_name = cfg["algorithm"]
+    if algo_name not in ALGO_MAP:
+        raise ValueError(
+            f"Unknown algorithm '{algo_name}'. "
+            f"Available: {', '.join(ALGO_MAP)}"
+        )
+    algo_cls = ALGO_MAP[algo_name]
+    hp = dict(cfg.get("hyperparameters", {}))
+    training = cfg.get("training", {})
 
-    model_path = Path(args.model_path)
+    policy_kwargs: dict = {}
+    if "net_arch" in hp:
+        policy_kwargs["net_arch"] = hp.pop("net_arch")
+    if "activation_fn" in hp:
+        import torch.nn as nn
+
+        _act_map = {"relu": nn.ReLU, "tanh": nn.Tanh, "elu": nn.ELU}
+        name = hp.pop("activation_fn")
+        if name not in _act_map:
+            raise ValueError(f"Unknown activation_fn '{name}'. Use: {list(_act_map)}")
+        policy_kwargs["activation_fn"] = _act_map[name]
+
+    return algo_cls(
+        cfg.get("policy", "MlpPolicy"),
+        env,
+        **hp,
+        **({"policy_kwargs": policy_kwargs} if policy_kwargs else {}),
+        verbose=training.get("verbose", 0),
+        seed=training.get("seed", 42),
+    )
+
+
+# ── CLI & main ───────────────────────────────────────────────────────────
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="Train an RL agent on HalfCheetah (config-driven)",
+    )
+    p.add_argument(
+        "--config", "-c", required=True,
+        help="Path to algorithm YAML config (e.g. src/configs/ppo.yaml)",
+    )
+    p.add_argument("--env-id", help="Override env.id from config")
+    p.add_argument("--total-steps", type=int, help="Override training.total_steps")
+    p.add_argument("--seed", type=int, help="Override training.seed")
+    p.add_argument("--model-path", help="Override training.model_path")
+    p.add_argument("--wandb", action="store_true", help="Enable W&B logging")
+    p.add_argument("--wandb-project", default=os.getenv("WANDB_PROJECT"))
+    p.add_argument("--wandb-entity", default=os.getenv("WANDB_ENTITY"))
+    p.add_argument("--wandb-run-name", default=os.getenv("WANDB_RUN_NAME"))
+    p.add_argument("--wandb-tags", default=os.getenv("WANDB_TAGS"))
+    return p.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+
+    cfg = load_config(args.config)
+    _apply_cli_overrides(cfg, args)
+
+    env_cfg = cfg.get("env", {})
+    training = cfg.get("training", {})
+    eval_cfg = cfg.get("evaluation", {})
+    wandb_cfg = cfg.get("wandb", {})
+
+    env_id: str = env_cfg["id"]
+    seed: int = training.get("seed", 42)
+    total_steps: int = training.get("total_steps", 500_000)
+    model_path = Path(training.get("model_path", "models/agent.zip"))
     model_path.parent.mkdir(parents=True, exist_ok=True)
 
     if args.wandb:
         import wandb
 
         wandb.init(
-            project=args.wandb_project,
-            entity=args.wandb_entity,
-            group=args.wandb_group,
-            name=args.wandb_run_name,
-            tags=[tag.strip() for tag in args.wandb_tags.split(",") if tag.strip()],
-            mode=args.wandb_mode,
+            project=wandb_cfg.get("project", "aidl-rl-benchmark"),
+            entity=wandb_cfg.get("entity"),
+            name=wandb_cfg.get("run_name"),
+            tags=wandb_cfg.get("tags", ["training"]),
             config={
-                "env_id": args.env_id,
-                "algo": args.algo,
-                "total_steps": args.total_steps,
-                "seed": args.seed,
+                "env_id": env_id,
+                "algorithm": cfg["algorithm"],
+                **cfg.get("hyperparameters", {}),
             },
         )
 
     vec_env = make_vec_env(
-        lambda: make_env(args.env_id, args.seed),
-        n_envs=1,
-        seed=args.seed
+        lambda: make_env(env_id, seed),
+        n_envs=training.get("n_envs", 1),
+        seed=seed,
     )
     vec_env = VecMonitor(vec_env)
 
-    algo_cls = ALGO_MAP[args.algo]
-    model_kwargs = {
-        "verbose": args.verbose,
-        "seed": args.seed,
-    }
-    if args.algo == "dqn":
-        model_kwargs.update(
-            {
-                "learning_rate": args.dqn_learning_rate,
-                "buffer_size": args.dqn_buffer_size,
-                "learning_starts": args.dqn_learning_starts,
-                "batch_size": args.dqn_batch_size,
-                "gamma": args.dqn_gamma,
-                "tau": args.dqn_tau,
-                "train_freq": args.dqn_train_freq,
-                "gradient_steps": args.dqn_gradient_steps,
-                "target_update_interval": args.dqn_target_update_interval,
-                "exploration_fraction": args.dqn_exploration_fraction,
-                "exploration_initial_eps": args.dqn_exploration_initial_eps,
-                "exploration_final_eps": args.dqn_exploration_final_eps,
-            }
-        )
-        if args.dqn_net_arch:
-            net_arch = [int(x.strip()) for x in args.dqn_net_arch.split(",") if x.strip()]
-            if net_arch:
-                model_kwargs["policy_kwargs"] = {"net_arch": net_arch}
+    model = build_model(cfg, vec_env)
 
-    model = algo_cls("MlpPolicy", vec_env, **model_kwargs)
-
-    callbacks = []
+    callbacks: list[BaseCallback] = []
     eval_env = None
-    if args.eval_interval > 0:
-        eval_env = make_env(args.env_id, args.seed + 1, render_mode="rgb_array" if args.eval_video else None)
-        if args.wandb:
-            callbacks.append(
-                WandbEvalCallback(
-                    eval_env,
-                    args.eval_interval,
-                    args.eval_episodes,
-                    args.eval_video,
-                    args.eval_video_interval or args.eval_interval,
-                    args.eval_video_fps,
-                    args.eval_video_max_frames,
-                    args.eval_video_format,
-                )
-            )
-    if args.wandb:
-        callbacks.append(WandbTrainCallback(args.log_interval))
 
-    start = time.time()
-    model.learn(total_timesteps=args.total_steps, callback=callbacks if callbacks else None)
-    elapsed = time.time() - start
+    if args.wandb:
+        callbacks.append(TrainLogCallback(training.get("log_interval", 1000)))
+        if eval_cfg.get("interval", 0) > 0:
+            eval_env = make_env(env_id, seed + 1)
+            callbacks.append(EvalCallback(eval_env, cfg))
+
+    t0 = time.time()
+    model.learn(total_timesteps=total_steps, callback=callbacks or None)
+    elapsed = time.time() - t0
     model.save(str(model_path))
+    print(f"Saved model to {model_path}  ({elapsed:.1f}s, {total_steps} steps)")
 
     if args.wandb:
         import wandb
 
-        wandb.log(
-            {
-                "train/elapsed_sec": elapsed,
-                "train/total_timesteps": args.total_steps,
-            }
-        )
+        wandb.log({"train/total_sec": elapsed})
         wandb.finish()
-
-    if eval_env is not None:
+    if eval_env:
         eval_env.close()
-
-    print(f"Saved model to {model_path}")
 
 
 if __name__ == "__main__":

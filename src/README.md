@@ -1,42 +1,68 @@
-# Student Starter Kit
+# Student Starter Kit — HalfCheetah RL Competition
 
-## 1) Install (Python 3.13)
-We recommend Python 3.13 to avoid building `pygame` from source.
+## 1) Install (Python 3.11+)
 ```bash
 uv venv --python 3.13 .venv
-uv pip install -p .venv/bin/python -r src/requirements.txt
+uv pip install -p .venv/bin/python -r src/requirements.txt -r eval/requirements.txt
 ```
 
-## 2) Train a baseline
+Requires `gymnasium[mujoco]` for HalfCheetah (MuJoCo).
+
+## 2) Train (config-driven)
+All hyperparameters live in YAML configs under `src/configs/`. Use `-c` to pick an algorithm and override env or steps as needed.
+
+**Phase 1 — Run (default):**
 ```bash
-python src/train.py --env-id MiniGrid-Empty-6x6-v0 --algo ppo --total-steps 200000 --verbose 0
+python src/train.py -c src/configs/ppo.yaml
+python src/train.py -c src/configs/sac.yaml --wandb
+```
+
+**Phase 2 — Backflip:** train with the backflip reward by overriding env-id:
+```bash
+python src/train.py -c src/configs/sac.yaml --env-id HalfCheetah-v4:backflip --wandb
+```
+
+**Phase 3 — Efficient Run:**
+```bash
+python src/train.py -c src/configs/sac.yaml --env-id HalfCheetah-v4:efficient --wandb
+```
+
+Override steps or seed:
+```bash
+python src/train.py -c src/configs/ppo.yaml --total-steps 300000 --seed 42
 ```
 
 ## 3) Evaluate + Submit
+Use the same `env_id` (including phase) and algo as in your training config.
+
 ```bash
 python src/eval_submit.py \
-  --session-code LAB2026 \
+  --session-code YOUR_SESSION_CODE \
   --team-name "Team Turbo" \
-  --env-id MiniGrid-Empty-6x6-v0 \
-  --algo ppo \
-  --model-path models/agent.zip \
-  --api-url https://YOUR-VERCEL-DOMAIN/api/submit
+  --env-id HalfCheetah-v4:run \
+  --algo sac \
+  --model-path models/sac_agent.zip \
+  --api-url https://YOUR-DOMAIN/api/submit
 ```
 
-## Optional: Weights & Biases logging
-Set `WANDB_API_KEY` and add `--wandb` to log training and submissions.
+For Phase 2 or 3, set `--env-id HalfCheetah-v4:backflip` or `HalfCheetah-v4:efficient` and the model path for that phase.
+
+## Optional: Weights & Biases
+Set `WANDB_API_KEY` and add `--wandb` to training and submission.
 ```bash
-python src/train.py --env-id MiniGrid-Empty-6x6-v0 --algo ppo --total-steps 200000 --wandb --log-interval 1000 --eval-interval 10000 --eval-video
-python src/eval_submit.py --session-code YOUR_SESSION_CODE --team-name "Team Turbo" --env-id MiniGrid-Empty-6x6-v0 --algo ppo --model-path models/agent.zip --api-url https://YOUR-VERCEL-DOMAIN/api/submit --wandb --eval-video --eval-video-format gif
+python src/train.py -c src/configs/sac.yaml --wandb
+python src/eval_submit.py ... --wandb --eval-video --eval-video-format mp4
 ```
 
-## DQN tuning
-```bash
-python src/train.py --env-id MiniGrid-Empty-6x6-v0 --algo dqn --total-steps 400000 --verbose 0 \\
-  --dqn-exploration-fraction 0.3 --dqn-exploration-final-eps 0.05 --dqn-learning-rate 1e-4 \\
-  --dqn-buffer-size 200000 --dqn-learning-starts 10000 --dqn-train-freq 4 --dqn-gradient-steps 1
-```
+## Algorithms and configs
+- **PPO** — `src/configs/ppo.yaml`
+- **SAC** — `src/configs/sac.yaml` (recommended for continuous control)
+- **TD3** — `src/configs/td3.yaml`
+- **A2C** — `src/configs/a2c.yaml`
 
-## Notes
-- Env 1 must reach success_rate ≥ 0.6 to unlock Env 2.
-- Your total score is the weighted sum of best mean_return per environment.
+## Phase progression
+- **Phase 1 (Run)** is always available. Reach the session’s mean_return threshold to unlock Phase 2.
+- **Phase 2 (Backflip)** unlocks after Phase 1. Reach its threshold to unlock Phase 3.
+- **Phase 3 (Efficient Run)** — your weighted total across phases determines your rank.
+
+Your total score is the weighted sum of your best mean_return per phase.
