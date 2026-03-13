@@ -42,10 +42,28 @@ python src/eval_submit.py \
   --env-id HalfCheetah-v4:run \
   --algo sac \
   --model-path models/sac_agent.zip \
-  --api-url https://YOUR-DOMAIN/api/submit
+  --api-url https://YOUR-DOMAIN/api/submit \
+  --video-path /path/to/attempt.mp4
 ```
 
 For Phase 2 or 3, set `--env-id HalfCheetah-v4:backflip` or `HalfCheetah-v4:efficient` and the model path for that phase.
+`--video-path` can be a local file (or Colab path like `/content/attempt.mp4`) and is uploaded automatically to the Railway bucket before submitting the score.
+If you already uploaded elsewhere, you can still use `--video-url` or `--video-key`.
+
+### Upload to Railway Bucket (optional)
+The script uses this API internally when `--video-path` is provided:
+- Requests a presigned URL at `/api/video/upload-url`
+- Uploads the video file to bucket via signed `PUT`
+- Submits with returned `video_key`
+
+If your Python environment fails TLS verification on submit, try:
+```bash
+python src/eval_submit.py ... --ca-bundle /path/to/ca-bundle.pem
+```
+As a last resort for local testing only:
+```bash
+python src/eval_submit.py ... --insecure-skip-verify
+```
 
 ## Optional: Weights & Biases
 Set `WANDB_API_KEY` and add `--wandb` to training and submission.

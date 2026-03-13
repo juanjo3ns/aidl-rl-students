@@ -99,7 +99,7 @@ def _http_error_message(error: urllib.error.HTTPError) -> str:
         return body or str(error.reason)
 
 
-def _post_json_with_context(api_url: str, payload: dict, *, context: ssl.SSLContext, timeout: float):
+def _post_json_with_context(api_url: str, payload: dict, *, context: ssl.SSLContext, timeout: float) -> dict:
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         api_url,
@@ -119,7 +119,7 @@ def _request_json(
     ca_bundle: str | None = None,
     insecure_skip_verify: bool = False,
     timeout: float = 30.0,
-):
+) -> dict:
     ssl_error: urllib.error.URLError | None = None
     for context in _build_context_chain(
         ca_bundle=ca_bundle,
@@ -176,6 +176,7 @@ def upload_file_to_signed_url(
 
     data = path.read_bytes()
     ssl_error: urllib.error.URLError | None = None
+
     for context in _build_context_chain(
         ca_bundle=ca_bundle,
         insecure_skip_verify=insecure_skip_verify,
@@ -210,7 +211,7 @@ def submit(
     ca_bundle: str | None = None,
     insecure_skip_verify: bool = False,
     timeout: float = 30.0,
-):
+) -> dict:
     return _request_json(
         api_url,
         payload,
@@ -294,6 +295,123 @@ def upload_video_and_get_key(
     return video_key
 
 
+def evaluate_and_submit(
+    session_code: str,
+    team_name: str,
+    env_id: str,
+    algo: str,
+    model_path: str,
+    api_url: str,
+    *,
+    seeds_path: str = "eval/seeds.json",
+    episodes_per_seed: int = 5,
+    use_wandb: bool = False,
+    eval_video: bool = False,
+    video_fps: int = 10,
+    video_max_frames: int = 500,
+    video_format: str = "mp4",
+    video_url: str | None = None,
+    video_key: str | None = None,
+    video_path: str | None = None,
+    video_content_type: str | None = None,
+    video_upload_url: str | None = None,
+    ca_bundle: str | None = None,
+    insecure_skip_verify: bool = False,
+    timeout: float = 30.0,
+) -> dict:
+    """Evaluate the model and submit to the leaderboard API. Returns the API response.
+
+    Use this from notebooks or scripts when you have paths and options in memory.
+    """
+    metrics = run_eval(env_id, algo, model_path, seeds_path, episodes_per_seed)
+    if video_path and (video_url or video_key):
+        raise ValueError("Use either video_path or video_url/video_key, not both.")
+
+    resolved_video_key = video_key
+    resolved_video_url = video_url
+
+    if video_path:
+        print(f"Uploading video from {video_path} ...")
+        resolved_video_key = upload_video_and_get_key(
+            api_url=api_url,
+            session_code=session_code,
+            team_name=team_name,
+            env_id=env_id,
+            video_path=video_path,
+            video_content_type=video_content_type,
+            video_upload_url=video_upload_url,
+            ca_bundle=ca_bundle,
+            insecure_skip_verify=insecure_skip_verify,
+            timeout=timeout,
+        )
+        resolved_video_url = None
+        print(f"Video uploaded. key={resolved_video_key}")
+
+    payload = {
+        "session_code": session_code,
+        "team_name": team_name,
+        "env_id": env_id,
+        "algo": algo,
+        "seed": 0,
+        "num_episodes": metrics["num_episodes"],
+        "mean_return": metrics["mean_return"],
+        "std_return": metrics["std_return"],
+        "max_return": metrics["max_return"],
+        "success_rate": metrics["success_rate"],
+        "runtime_sec": metrics["runtime_sec"],
+        "video_url": resolved_video_url,
+        "video_key": resolved_video_key,
+    }
+    response = submit(
+        api_url,
+        payload,
+        ca_bundle=ca_bundle,
+        insecure_skip_verify=insecure_skip_verify,
+        timeout=timeout,
+    )
+    print(json.dumps(response, indent=2))
+
+    if use_wandb:
+        import wandb
+
+        wandb.init(
+            project=os.getenv("WANDB_PROJECT", "aidl-rl-benchmark"),
+            entity=os.getenv("WANDB_ENTITY"),
+            group=os.getenv("WANDB_GROUP"),
+            name=os.getenv("WANDB_RUN_NAME"),
+            tags=[t.strip() for t in (os.getenv("WANDB_TAGS", "submission") or "").split(",") if t.strip()],
+            mode=os.getenv("WANDB_MODE", "online"),
+            config={
+                "session_code": session_code,
+                "team_name": team_name,
+                "env_id": env_id,
+                "algo": algo,
+            },
+        )
+        rank = None
+        leaderboard = response.get("leaderboard", [])
+        for idx, entry in enumerate(leaderboard):
+            if entry.get("team_name") == team_name:
+                rank = idx + 1
+                break
+        wandb.log(
+            {
+                "eval/mean_return": metrics["mean_return"],
+                "eval/std_return": metrics["std_return"],
+                "eval/max_return": metrics["max_return"],
+                "eval/success_rate": metrics["success_rate"],
+                "submission/rank": rank,
+            }
+        )
+        if eval_video:
+            frames = record_video(env_id, model_path, algo, video_max_frames)
+            if frames is not None:
+                wandb.log({"eval/video": wandb.Video(frames, fps=video_fps, format=video_format)})
+        wandb.finish()
+
+    return response
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--session-code", required=True)
@@ -321,12 +439,6 @@ def main():
         help="HTTP timeout in seconds for submission requests.",
     )
     parser.add_argument("--wandb", action="store_true", help="Enable Weights & Biases logging.")
-    parser.add_argument("--wandb-project", default=os.getenv("WANDB_PROJECT", "aidl-rl-benchmark"))
-    parser.add_argument("--wandb-entity", default=os.getenv("WANDB_ENTITY"))
-    parser.add_argument("--wandb-group", default=os.getenv("WANDB_GROUP"))
-    parser.add_argument("--wandb-run-name", default=os.getenv("WANDB_RUN_NAME"))
-    parser.add_argument("--wandb-tags", default=os.getenv("WANDB_TAGS", "submission"))
-    parser.add_argument("--wandb-mode", default=os.getenv("WANDB_MODE", "online"))
     parser.add_argument("--eval-video", action="store_true", help="Upload an eval video to W&B.")
     parser.add_argument("--eval-video-fps", type=int, default=10)
     parser.add_argument("--eval-video-max-frames", type=int, default=500)
@@ -358,94 +470,29 @@ def main():
     )
     args = parser.parse_args()
 
-    metrics = run_eval(args.env_id, args.algo, args.model_path, args.seeds, args.episodes_per_seed)
-
-    if args.video_path and (args.video_url or args.video_key):
-        raise ValueError("Use either --video-path or --video-url/--video-key, not both.")
-
-    resolved_video_key = args.video_key
-    resolved_video_url = args.video_url
-    if args.video_path:
-        print(f"Uploading video from {args.video_path} ...")
-        resolved_video_key = upload_video_and_get_key(
-            api_url=args.api_url,
-            session_code=args.session_code,
-            team_name=args.team_name,
-            env_id=args.env_id,
-            video_path=args.video_path,
-            video_content_type=args.video_content_type,
-            video_upload_url=args.video_upload_url,
-            ca_bundle=args.ca_bundle,
-            insecure_skip_verify=args.insecure_skip_verify,
-            timeout=args.timeout,
-        )
-        resolved_video_url = None
-        print(f"Video uploaded. key={resolved_video_key}")
-
-    payload = {
-        "session_code": args.session_code,
-        "team_name": args.team_name,
-        "env_id": args.env_id,
-        "algo": args.algo,
-        "seed": 0,
-        "num_episodes": metrics["num_episodes"],
-        "mean_return": metrics["mean_return"],
-        "std_return": metrics["std_return"],
-        "max_return": metrics["max_return"],
-        "success_rate": metrics["success_rate"],
-        "runtime_sec": metrics["runtime_sec"],
-        "video_url": resolved_video_url,
-        "video_key": resolved_video_key,
-    }
-
-    response = submit(
+    evaluate_and_submit(
+        args.session_code,
+        args.team_name,
+        args.env_id,
+        args.algo,
+        args.model_path,
         args.api_url,
-        payload,
+        seeds_path=args.seeds,
+        episodes_per_seed=args.episodes_per_seed,
+        use_wandb=args.wandb,
+        eval_video=args.eval_video,
+        video_fps=args.eval_video_fps,
+        video_max_frames=args.eval_video_max_frames,
+        video_format=args.eval_video_format,
+        video_url=args.video_url,
+        video_key=args.video_key,
+        video_path=args.video_path,
+        video_content_type=args.video_content_type,
+        video_upload_url=args.video_upload_url,
         ca_bundle=args.ca_bundle,
         insecure_skip_verify=args.insecure_skip_verify,
         timeout=args.timeout,
     )
-    print(json.dumps(response, indent=2))
-
-    if args.wandb:
-        import wandb
-
-        wandb.init(
-            project=args.wandb_project,
-            entity=args.wandb_entity,
-            group=args.wandb_group,
-            name=args.wandb_run_name,
-            tags=[tag.strip() for tag in args.wandb_tags.split(",") if tag.strip()],
-            mode=args.wandb_mode,
-            config={
-                "session_code": args.session_code,
-                "team_name": args.team_name,
-                "env_id": args.env_id,
-                "algo": args.algo,
-            },
-        )
-
-        rank = None
-        leaderboard = response.get("leaderboard", [])
-        for idx, entry in enumerate(leaderboard):
-            if entry.get("team_name") == args.team_name:
-                rank = idx + 1
-                break
-
-        wandb.log(
-            {
-                "eval/mean_return": metrics["mean_return"],
-                "eval/std_return": metrics["std_return"],
-                "eval/max_return": metrics["max_return"],
-                "eval/success_rate": metrics["success_rate"],
-                "submission/rank": rank,
-            }
-        )
-        if args.eval_video:
-            frames = record_video(args.env_id, args.model_path, args.algo, args.eval_video_max_frames)
-            if frames is not None:
-                wandb.log({"eval/video": wandb.Video(frames, fps=args.eval_video_fps, format=args.eval_video_format)})
-        wandb.finish()
 
 
 if __name__ == "__main__":

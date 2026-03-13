@@ -3,13 +3,13 @@
 All algorithm hyper-parameters live in YAML config files (see src/configs/).
 CLI flags exist only for per-run overrides (env, seed, wandb, …).
 
-Phases are encoded as compound env IDs: HalfCheetah-v4:run, HalfCheetah-v4:backflip,
-HalfCheetah-v4:efficient. The correct reward wrapper is applied automatically.
+Phases are encoded as compound env IDs: HalfCheetah-v5:run, HalfCheetah-v5:backflip,
+HalfCheetah-v5:efficient. The correct reward wrapper is applied automatically.
 
 Usage
 -----
     python src/train.py -c src/configs/ppo.yaml
-    python src/train.py -c src/configs/sac.yaml --env-id HalfCheetah-v4:backflip --wandb
+    python src/train.py -c src/configs/sac.yaml --env-id HalfCheetah-v5:backflip --wandb
     python src/train.py -c src/configs/td3.yaml --total-steps 500000 --wandb
 """
 
@@ -44,7 +44,7 @@ ALGO_MAP: dict[str, type] = {
 
 # ── Compound env_id parsing ─────────────────────────────────────────────
 def parse_env_id(env_id: str) -> tuple[str, str | None]:
-    """Split compound id like 'HalfCheetah-v4:backflip' into (base_id, phase)."""
+    """Split compound id like 'HalfCheetah-v5:backflip' into (base_id, phase)."""
     if ":" in env_id:
         base, phase = env_id.rsplit(":", 1)
         return base.strip(), phase.strip()
@@ -306,45 +306,25 @@ def build_model(cfg: dict, env):
     )
 
 
-# ── CLI & main ───────────────────────────────────────────────────────────
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(
-        description="Train an RL agent on HalfCheetah (config-driven)",
-    )
-    p.add_argument(
-        "--config", "-c", required=True,
-        help="Path to algorithm YAML config (e.g. src/configs/ppo.yaml)",
-    )
-    p.add_argument("--env-id", help="Override env.id from config")
-    p.add_argument("--total-steps", type=int, help="Override training.total_steps")
-    p.add_argument("--seed", type=int, help="Override training.seed")
-    p.add_argument("--model-path", help="Override training.model_path")
-    p.add_argument("--wandb", action="store_true", help="Enable W&B logging")
-    p.add_argument("--wandb-project", default=os.getenv("WANDB_PROJECT"))
-    p.add_argument("--wandb-entity", default=os.getenv("WANDB_ENTITY"))
-    p.add_argument("--wandb-run-name", default=os.getenv("WANDB_RUN_NAME"))
-    p.add_argument("--wandb-tags", default=os.getenv("WANDB_TAGS"))
-    return p.parse_args()
+# ── Programmatic entry point (e.g. for Colab) ─────────────────────────────
+def run_training(cfg: dict, use_wandb: bool = False) -> Path:
+    """Run training from a config dict. Returns the path to the saved model.
 
-
-def main() -> None:
-    args = parse_args()
-
-    cfg = load_config(args.config)
-    _apply_cli_overrides(cfg, args)
-
+    Use this from notebooks or scripts when you have the config in memory
+    (e.g. an editable dict). Same config structure as the YAML files.
+    """
     env_cfg = cfg.get("env", {})
     training = cfg.get("training", {})
     eval_cfg = cfg.get("evaluation", {})
     wandb_cfg = cfg.get("wandb", {})
 
-    env_id: str = env_cfg["id"]
-    seed: int = training.get("seed", 42)
-    total_steps: int = training.get("total_steps", 500_000)
+    env_id = env_cfg["id"]
+    seed = training.get("seed", 42)
+    total_steps = training.get("total_steps", 500_000)
     model_path = Path(training.get("model_path", "models/agent.zip"))
     model_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if args.wandb:
+    if use_wandb:
         import wandb
 
         wandb.init(
@@ -371,7 +351,7 @@ def main() -> None:
     callbacks: list[BaseCallback] = []
     eval_env = None
 
-    if args.wandb:
+    if use_wandb:
         callbacks.append(TrainLogCallback(training.get("log_interval", 1000)))
         if eval_cfg.get("interval", 0) > 0:
             eval_env = make_env(env_id, seed + 1)
@@ -383,13 +363,43 @@ def main() -> None:
     model.save(str(model_path))
     print(f"Saved model to {model_path}  ({elapsed:.1f}s, {total_steps} steps)")
 
-    if args.wandb:
+    if use_wandb:
         import wandb
 
         wandb.log({"train/total_sec": elapsed})
         wandb.finish()
     if eval_env:
         eval_env.close()
+
+    return model_path
+
+
+# ── CLI & main ───────────────────────────────────────────────────────────
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="Train an RL agent on HalfCheetah (config-driven)",
+    )
+    p.add_argument(
+        "--config", "-c", required=True,
+        help="Path to algorithm YAML config (e.g. src/configs/ppo.yaml)",
+    )
+    p.add_argument("--env-id", help="Override env.id from config")
+    p.add_argument("--total-steps", type=int, help="Override training.total_steps")
+    p.add_argument("--seed", type=int, help="Override training.seed")
+    p.add_argument("--model-path", help="Override training.model_path")
+    p.add_argument("--wandb", action="store_true", help="Enable W&B logging")
+    p.add_argument("--wandb-project", default=os.getenv("WANDB_PROJECT"))
+    p.add_argument("--wandb-entity", default=os.getenv("WANDB_ENTITY"))
+    p.add_argument("--wandb-run-name", default=os.getenv("WANDB_RUN_NAME"))
+    p.add_argument("--wandb-tags", default=os.getenv("WANDB_TAGS"))
+    return p.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    cfg = load_config(args.config)
+    _apply_cli_overrides(cfg, args)
+    run_training(cfg, use_wandb=args.wandb)
 
 
 if __name__ == "__main__":
