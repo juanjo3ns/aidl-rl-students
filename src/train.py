@@ -30,7 +30,6 @@ from gymnasium.wrappers import RecordVideo
 from stable_baselines3 import A2C, DQN, PPO, SAC, TD3
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.env_util import make_vec_env
-from stable_baselines3.common.vec_env import VecMonitor
 
 # ── Algorithm registry ───────────────────────────────────────────────────
 ALGO_MAP: dict[str, type] = {
@@ -140,31 +139,38 @@ def record_episode_video(
     seed: int,
     model,
 ) -> tuple[str | None, str | None]:
-    """Record a single evaluation episode to **mp4**."""
+    """Record a single evaluation episode to **mp4**.
+
+    Returns (video_path, tmp_dir) on success, (None, None) on failure
+    (e.g. headless environment without EGL).
+    """
     tmp_dir = tempfile.mkdtemp()
-    env = make_env(env_id, seed, render_mode="rgb_array")
-    rec = RecordVideo(
-        env,
-        tmp_dir,
-        episode_trigger=lambda ep: ep == 0,
-        disable_logger=True,
-    )
+    try:
+        env = make_env(env_id, seed, render_mode="rgb_array")
+        rec = RecordVideo(
+            env,
+            tmp_dir,
+            episode_trigger=lambda ep: ep == 0,
+            disable_logger=True,
+        )
 
-    obs, _ = rec.reset()
-    done = False
-    while not done:
-        action, _ = model.predict(obs, deterministic=True)
-        obs, _, terminated, truncated, _ = rec.step(action)
-        done = terminated or truncated
-    rec.close()
+        obs, _ = rec.reset()
+        done = False
+        while not done:
+            action, _ = model.predict(obs, deterministic=True)
+            obs, _, terminated, truncated, _ = rec.step(action)
+            done = terminated or truncated
+        rec.close()
 
-    videos = sorted(
-        Path(tmp_dir).glob("*.mp4"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    if videos:
-        return str(videos[0]), tmp_dir
+        videos = sorted(
+            Path(tmp_dir).glob("*.mp4"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if videos:
+            return str(videos[0]), tmp_dir
+    except Exception as e:
+        print(f"[video] Skipping video recording: {e}")
 
     shutil.rmtree(tmp_dir, ignore_errors=True)
     return None, None
@@ -347,7 +353,6 @@ def run_training(cfg: dict, use_wandb: bool = False) -> Path:
         n_envs=training.get("n_envs", 1),
         seed=seed,
     )
-    vec_env = VecMonitor(vec_env)
 
     model = build_model(cfg, vec_env)
 
