@@ -366,10 +366,14 @@ def run_training(cfg: dict, use_wandb: bool = False) -> Path:
             callbacks.append(EvalCallback(eval_env, cfg))
 
     t0 = time.time()
-    model.learn(total_timesteps=total_steps, callback=callbacks or None)
+    try:
+        model.learn(total_timesteps=total_steps, callback=callbacks or None)
+    except KeyboardInterrupt:
+        print("\nTraining interrupted — saving current model...")
     elapsed = time.time() - t0
     model.save(str(model_path))
-    print(f"Saved model to {model_path}  ({elapsed:.1f}s, {total_steps} steps)")
+    steps_done = model.num_timesteps
+    print(f"Saved model to {model_path}  ({elapsed:.1f}s, {steps_done} steps)")
 
     if use_wandb:
         import wandb
