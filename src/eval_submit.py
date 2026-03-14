@@ -330,6 +330,30 @@ def evaluate_and_submit(
     resolved_video_key = video_key
     resolved_video_url = video_url
 
+    # Auto-record video if eval_video=True and no explicit video source given
+    _auto_video_path = None
+    if eval_video and not video_path and not video_url and not video_key:
+        try:
+            import tempfile
+            frames = record_video(env_id, model_path, algo, video_max_frames)
+            if frames is not None and len(frames) > 0:
+                _auto_video_path = os.path.join(tempfile.mkdtemp(), "eval_video.mp4")
+                try:
+                    import imageio
+                    writer = imageio.get_writer(_auto_video_path, fps=video_fps)
+                    for frame in frames:
+                        writer.append_data(frame)
+                    writer.close()
+                except ImportError:
+                    from moviepy.editor import ImageSequenceClip
+                    clip = ImageSequenceClip(list(frames), fps=video_fps)
+                    clip.write_videofile(_auto_video_path, codec="libx264", logger=None)
+                    clip.close()
+                video_path = _auto_video_path
+                print(f"Recorded eval video ({len(frames)} frames) at {video_path}")
+        except Exception as e:
+            print(f"[video] Could not auto-record video: {e}")
+
     if video_path:
         print(f"Uploading video from {video_path} ...")
         resolved_video_key = upload_video_and_get_key(
@@ -404,10 +428,18 @@ def evaluate_and_submit(
             }
         )
         if eval_video:
-            frames = record_video(env_id, model_path, algo, video_max_frames)
-            if frames is not None:
-                wandb.log({"eval/video": wandb.Video(frames, fps=video_fps, format=video_format)})
+            if _auto_video_path and os.path.exists(_auto_video_path):
+                wandb.log({"eval/video": wandb.Video(_auto_video_path, fps=video_fps, format="mp4")})
+            else:
+                frames = record_video(env_id, model_path, algo, video_max_frames)
+                if frames is not None:
+                    wandb.log({"eval/video": wandb.Video(frames, fps=video_fps, format=video_format)})
         wandb.finish()
+
+    # Clean up auto-recorded temp video
+    if _auto_video_path:
+        import shutil
+        shutil.rmtree(os.path.dirname(_auto_video_path), ignore_errors=True)
 
     return response
 
