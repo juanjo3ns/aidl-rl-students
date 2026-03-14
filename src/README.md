@@ -19,12 +19,12 @@ python src/train.py -c src/configs/sac.yaml --wandb
 
 **Phase 2 — Backflip:** train with the backflip reward by overriding env-id:
 ```bash
-python src/train.py -c src/configs/sac.yaml --env-id HalfCheetah-v4:backflip --wandb
+python src/train.py -c src/configs/sac.yaml --env-id HalfCheetah-v5:backflip --wandb
 ```
 
 **Phase 3 — Efficient Run:**
 ```bash
-python src/train.py -c src/configs/sac.yaml --env-id HalfCheetah-v4:efficient --wandb
+python src/train.py -c src/configs/sac.yaml --env-id HalfCheetah-v5:efficient --wandb
 ```
 
 Override steps or seed:
@@ -39,14 +39,14 @@ Use the same `env_id` (including phase) and algo as in your training config.
 python src/eval_submit.py \
   --session-code YOUR_SESSION_CODE \
   --team-name "Team Turbo" \
-  --env-id HalfCheetah-v4:run \
+  --env-id HalfCheetah-v5:run \
   --algo sac \
   --model-path models/sac_agent.zip \
   --api-url https://YOUR-DOMAIN/api/submit \
   --video-path /path/to/attempt.mp4
 ```
 
-For Phase 2 or 3, set `--env-id HalfCheetah-v4:backflip` or `HalfCheetah-v4:efficient` and the model path for that phase.
+For Phase 2 or 3, set `--env-id HalfCheetah-v5:backflip` or `HalfCheetah-v5:efficient` and the model path for that phase.
 `--video-path` can be a local file (or Colab path like `/content/attempt.mp4`) and is uploaded automatically to the Railway bucket before submitting the score.
 If you already uploaded elsewhere, you can still use `--video-url` or `--video-key`.
 

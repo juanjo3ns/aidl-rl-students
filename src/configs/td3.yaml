@@ -3,7 +3,7 @@ algorithm: td3
 policy: MlpPolicy
 
 env:
-  id: HalfCheetah-v4:run
+  id: HalfCheetah-v5:run
 
 hyperparameters:
   learning_rate: 3.0e-4

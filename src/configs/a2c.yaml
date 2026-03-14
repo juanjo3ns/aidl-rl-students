@@ -3,7 +3,7 @@ algorithm: a2c
 policy: MlpPolicy
 
 env:
-  id: HalfCheetah-v4:run
+  id: HalfCheetah-v5:run
 
 hyperparameters:
   learning_rate: 7.0e-4

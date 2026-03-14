@@ -10,16 +10,16 @@ uv pip install -p .venv/bin/python -r eval/requirements.txt -r src/requirements.
 
 ## Train (config-driven)
 ```bash
-python src/train.py -c src/configs/sac.yaml --env-id HalfCheetah-v4:run --wandb
+python src/train.py -c src/configs/sac.yaml --env-id HalfCheetah-v5:run --wandb
 ```
-Use `--env-id HalfCheetah-v4:backflip` or `HalfCheetah-v4:efficient` for Phase 2 or 3. Configs: ppo, sac, td3, a2c in `src/configs/`.
+Use `--env-id HalfCheetah-v5:backflip` or `HalfCheetah-v5:efficient` for Phase 2 or 3. Configs: ppo, sac, td3, a2c in `src/configs/`.
 
 ## Evaluate + Submit
 ```bash
 python src/eval_submit.py \
   --session-code YOUR_SESSION_CODE \
   --team-name "Team Turbo" \
-  --env-id HalfCheetah-v4:run \
+  --env-id HalfCheetah-v5:run \
   --algo sac \
   --model-path models/sac_agent.zip \
   --api-url https://YOUR-DOMAIN/api/submit
