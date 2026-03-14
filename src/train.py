@@ -57,12 +57,15 @@ class BackflipReward(gym.RewardWrapper):
 
     def step(self, action):
         obs, reward, terminated, truncated, info = self.env.step(action)
-        qvel = self.unwrapped.data.qvel
-        if len(qvel) >= 6:
-            angular = np.array(qvel[3:6], dtype=np.float64)
-            new_reward = float(np.linalg.norm(angular))
-        else:
-            new_reward = 0.0
+        # ── TODO (Phase 2): compute the backflip reward ──────────────
+        # Hints:
+        #   - Access joint velocities via: self.unwrapped.data.qvel
+        #   - Indices 3:6 are the torso angular velocity (wx, wy, wz)
+        #   - The reward should be the L2 norm of that angular velocity vector
+        #   - Use np.array(..., dtype=np.float64) and np.linalg.norm(...)
+        #   - Handle the edge case where qvel has fewer than 6 elements
+        new_reward = 0.0  # ← replace this with your implementation
+        # ─────────────────────────────────────────────────────────────
         return obs, new_reward, terminated, truncated, info
 
 
